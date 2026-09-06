@@ -60,27 +60,84 @@ Before implementing architecture or code, we established a rigorous threat model
   - Personal growth breakthroughs recognized by Gemini.
   - Zero-knowledge encryption compliance ratio.
 
+### 7. Voice Recording & Speech Dictation (MediaRecorder API)
+- Real-time in-browser audio capture with active duration pulse counter and codec negotiation (`audio/webm`, `audio/mp4`).
+- Protected background transcription endpoint (`/api/journal/transcribe`) utilizing Gemini multi-modal audio processing to convert speech directly into reflection text.
+
+### 8. Daily Affirmations Engine (24-Hour Gemini Cycle)
+- Mindful contemplation card resetting automatically every 24 hours at midnight.
+- Structured AI generation providing empowering daily affirmations, mindfulness themes, reflection cues, and one-click transition into the Reflection Studio.
+
 ---
 
 ## 🏗️ Architecture Overview
 
+> 📖 **Full Architectural Specification**: See [ARCHITECTURE.md](./ARCHITECTURE.md) for sequence diagrams, threat defense surfaces, and deployment specifications.
+
+```mermaid
+flowchart TB
+    subgraph Client ["Client Layer (Browser / React SPA)"]
+        UI["Apple HIG Interface\n(Dashboard, Reflection Studio, Visualizer)"]
+        AUTH_CLIENT["Firebase Auth SDK\n(Google SSO / Student Quick-Launch)"]
+        CRYPTO["Web Crypto Engine\n(PBKDF2 + AES-256-GCM)"]
+        AUDIO_CLIENT["MediaRecorder API\n(Browser Mic Audio Stream)"]
+        CACHE["Local 24h Affirmation Cache\n(localStorage)"]
+    end
+
+    subgraph Edge ["Edge & Reverse Proxy"]
+        NGINX["Cloud Run Ingress / Nginx Proxy\n(Port 3000 HTTPS Termination)"]
+    end
+
+    subgraph Backend ["Server Layer (Node.js / Express on Cloud Run)"]
+        SERVER["Express API Server\n(server.ts)"]
+        AUTH_MID["Firebase Admin Auth Middleware\n(verifyIdToken)"]
+        SEC_MGR["GCP Secret Manager Client\n(@google-cloud/secret-manager)"]
+        GEMINI_ENGINE["Resilient Gemini Engine\n(server/geminiResilient.ts)"]
+        FALLBACK["5-Tier Fallback Ladder\n(gemini-3.6 -> 3.1 -> flash-latest -> 3.7 -> 3.8)"]
+    end
+
+    subgraph GoogleCloud ["Google Cloud & Firebase Infrastructure"]
+        GSM[("GCP Secret Manager\n(gemini-api-key)")]
+        FIRESTORE[("Cloud Firestore\n(/users/{userId}/journals/{journalId})")]
+        GEMINI_MODELS["Gemini Multi-Modal API\n(@google/genai)"]
+        FIREBASE_AUTH["Firebase Auth Service\n(OAuth / Identity Platform)"]
+    end
+
+    %% Client Interactions
+    UI --> AUTH_CLIENT
+    UI --> CRYPTO
+    UI --> AUDIO_CLIENT
+    UI --> CACHE
+    
+    %% Direct Secure DB Connection
+    UI -.->|"Direct Encrypted Writes\n(Strict firestore.rules)"| FIRESTORE
+    AUTH_CLIENT -.->|"Token Exchange"| FIREBASE_AUTH
+
+    %% API Ingress
+    UI -->|"HTTPS + Bearer ID Token"| NGINX
+    AUDIO_CLIENT -->|"Base64 Audio Chunks"| NGINX
+    NGINX --> SERVER
+
+    %% Server Internal Flow
+    SERVER --> AUTH_MID
+    AUTH_MID -.->|"Validate Token"| FIREBASE_AUTH
+    SERVER --> SEC_MGR
+    SEC_MGR -->|"Fetch Secret"| GSM
+    SERVER --> GEMINI_ENGINE
+    GEMINI_ENGINE --> FALLBACK
+    FALLBACK -->|"Model Requests"| GEMINI_MODELS
 ```
-[Browser / React Client]
-  │  ├── Web Crypto API (AES-256-GCM + PBKDF2 Client Encryption)
-  │  ├── Firebase Auth (Google Sign-In Popup)
-  │  └── Direct Firestore Client SDK (Guarded by firestore.rules)
-  │
-  ▼ (HTTPS + Authorization: Bearer <idToken>)
-[Cloud Run Service / Express + Vite]
-  │  ├── Firebase Admin SDK (verifyIdToken)
-  │  ├── Google Cloud Secret Manager (@google-cloud/secret-manager)
-  │  │     └── Dynamically retrieves GEMINI_API_KEY
-  │  └── Resilient Gemini API Utility (@google/genai)
-  │        └── Multi-Model Fallback Ladder (gemini-3.6-flash -> ...)
-  ▼
-[Cloud Firestore]
-  └── /users/{userId}/journals/{journalId}  (Strict Owner-Bound Rules)
-```
+
+### Architectural Highlights
+
+1. **Client-Side Zero-Knowledge Boundary**:
+   User reflections are encrypted in client RAM using **AES-256-GCM** derived via **PBKDF2** (100,000 iterations of SHA-256). Stored Firestore records contain only ciphertext, IV, and salt.
+2. **Server-Side AI & Secret Isolation**:
+   No API keys are exposed to the browser. The Node.js Express server on Cloud Run accesses Google Cloud Secret Manager via service account IAM to interact with `@google/genai`.
+3. **Resilient 5-Tier Fallback Ladder**:
+   Automated failover handles rate limits (429), model unavailability (503), not found (404), and server errors (500) using exponential backoff with jitter across `gemini-3.6-flash` → `gemini-3.1-flash-lite` → `gemini-flash-latest` → `gemini-3.7-flash` → `gemini-3.8-flash`.
+4. **Owner-Bound Database Partitioning**:
+   Firestore security rules strictly enforce `request.auth.uid == userId` under `/users/{userId}/journals/{journalId}`.
 
 ---
 
